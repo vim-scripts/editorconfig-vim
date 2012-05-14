@@ -33,35 +33,126 @@ if exists("g:loaded_EditorConfig")
 endif
 let g:loaded_EditorConfig = 1
 
+let s:saved_cpo = &cpo
+set cpo&vim
+
+" variables {{{1
 if !exists('g:EditorConfig_exec_path')
     let g:EditorConfig_exec_path = ''
 endif
 
-let s:saved_cpo = &cpo
-set cpo&vim
+if !exists('g:EditorConfig_python_files_dir')
+    let g:EditorConfig_python_files_dir = 'plugin/editorconfig-core-py'
+endif
 
-augroup editorconfig
-autocmd! editorconfig
-autocmd editorconfig BufNewFile,BufReadPost * call s:UseConfigFiles()
-autocmd editorconfig BufNewFile,BufRead .editorconfig set filetype=dosini
+if !exists('g:EditorConfig_verbose')
+    let g:EditorConfig_verbose = 0
+endif
 
-command! EditorConfigReload call s:UseConfigFiles() " Reload EditorConfig files
+if exists('g:EditorConfig_core_mode') && !empty(g:EditorConfig_core_mode)
+    let s:editorconfig_core_mode = g:EditorConfig_core_mode
+else
+    let s:editorconfig_core_mode = ''
+endif
 
-function! s:UseConfigFiles()
-
-    let l:cmd = ''
+function! s:FindPythonInterp() " {{{1
+" Find python interp. If found, return python command; if not found, return ''
 
     if has('unix')
         let l:searching_list = [
-                    \ g:EditorConfig_exec_path,
+                    \ 'python',
+                    \ 'python27',
+                    \ 'python26',
+                    \ 'python25',
+                    \ 'python24',
+                    \ '/usr/local/bin/python',
+                    \ '/usr/local/bin/python27',
+                    \ '/usr/local/bin/python26',
+                    \ '/usr/local/bin/python25',
+                    \ '/usr/local/bin/python24',
+                    \ '/usr/bin/python',
+                    \ '/usr/bin/python27',
+                    \ '/usr/bin/python26',
+                    \ '/usr/bin/python25',
+                    \ '/usr/bin/python24']
+    elseif has('win32')
+        let l:searching_list = [
+                    \ 'python',
+                    \ 'python27',
+                    \ 'python26',
+                    \ 'python25',
+                    \ 'python24',
+                    \ 'C:\Python27\python.exe',
+                    \ 'C:\Python26\python.exe',
+                    \ 'C:\Python25\python.exe',
+                    \ 'C:\Python24\python.exe']
+    endif
+
+    for possible_python_interp in l:searching_list
+        if executable(possible_python_interp)
+            return possible_python_interp
+        endif
+    endfor
+
+    return ''
+endfunction
+
+function! s:FindPythonFiles() " {{{1
+" Find EditorConfig Core python files
+
+    " On Windows, we still use slash rather than backslash
+    let l:old_shellslash = &shellslash
+    set shellslash
+
+    let l:python_core_files_dir = substitute(
+                \ findfile(g:EditorConfig_python_files_dir . '/main.py',
+                \ ','.&runtimepath), '/main.py$', '', '')
+
+    if empty(l:python_core_files_dir)
+        return ''
+    endif
+
+    " expand python core file path to full path, and remove the appending '/'
+    let l:python_core_files_dir = substitute(
+                \ fnamemodify(l:python_core_files_dir, ':p'), '/$', '', '')
+
+    set noshellslash
+
+    return l:python_core_files_dir
+endfunction
+
+" Mode initialization functions {{{1
+function! s:InitializeExternalCommand() " {{{2
+" Initialize external_command mode
+
+    let s:EditorConfig_exec_path = ''
+
+    " User has specified an EditorConfig command. Use that one.
+    if exists('g:EditorConfig_exec_path') &&
+                \ !empty(g:EditorConfig_exec_path)
+        if executable(g:EditorConfig_exec_path)
+            let s:EditorConfig_exec_path = g:EditorConfig_exec_path
+            return 0
+        else
+            return 1
+        endif
+    endif
+
+    " User does not specify an EditorConfig command. Let's search for it.
+    if has('unix')
+        let l:searching_list = [
                     \ 'editorconfig',
                     \ '/usr/local/bin/editorconfig',
                     \ '/usr/bin/editorconfig',
                     \ '/opt/bin/editorconfig',
-                    \ '/opt/editorconfig/bin/editorconfig']
+                    \ '/opt/editorconfig/bin/editorconfig',
+                    \ 'editorconfig.py',
+                    \ '/usr/local/bin/editorconfig.py',
+                    \ '/usr/bin/editorconfig.py',
+                    \ '/opt/bin/editorconfig.py',
+                    \ '/opt/editorconfig/bin/editorconfig.py']
     elseif has('win32')
         let l:searching_list = [
-                    \ g:EditorConfig_exec_path,
                     \ 'editorconfig',
                     \ 'C:\editorconfig\bin\editorconfig',
                     \ 'D:\editorconfig\bin\editorconfig',
@@ -70,19 +161,256 @@ function! s:UseConfigFiles()
                     \ 'C:\Program Files\editorconfig\bin\editorconfig',
                     \ 'D:\Program Files\editorconfig\bin\editorconfig',
                     \ 'E:\Program Files\editorconfig\bin\editorconfig',
-                    \ 'F:\Program Files\editorconfig\bin\editorconfig']
+                    \ 'F:\Program Files\editorconfig\bin\editorconfig',
+                    \ 'editorconfig.py']
     endif
 
-    " search for editorconfig core
+    " search for editorconfig core executable
     for possible_cmd in l:searching_list
         if executable(possible_cmd)
-            let l:cmd = possible_cmd
-            " let g:EditorConfig_exec_path as the command thus we could save
-            " time to find the EditorConfig core next time
-            let g:EditorConfig_exec_path = l:cmd
+            let s:EditorConfig_exec_path = possible_cmd
             break
         endif
     endfor
+
+    if empty(s:EditorConfig_exec_path)
+        return 2
+    endif
+
+    return 0
+endfunction
+
+function! s:InitializePythonExternal() " {{{2
+" Initialize external python. Before calling this function, please make sure
+" s:FindPythonFiles is called and the return value is set to
+" s:editorconfig_core_py_dir
+
+    if !exists('s:editorconfig_core_py_dir') ||
+                \ empty(s:editorconfig_core_py_dir)
+        return 2
+    endif
+
+    " Find python interp 
+    if !exists('g:editorconfig_python_interp') ||
+                \ empty('g:editorconfig_python_interp')
+        let s:editorconfig_python_interp = s:FindPythonInterp()
+    endif
+
+    if empty(s:editorconfig_python_interp) ||
+                \ !executable(s:editorconfig_python_interp)
+        return 1
+    endif
+
+    return 0
+endfunction
+
+function! s:InitializePythonBuiltin(editorconfig_core_py_dir) " {{{2
+" Initialize builtin python. The parameter is the Python Core directory
+
+    if exists('s:builtin_python_initialized') && s:builtin_python_initialized
+        return 0
+    endif
+
+    let s:builtin_python_initialized = 1
+
+    let l:ret = 0
+
+    if !has('python')
+        return 1
+    endif
+
+    python << EEOOFF
+
+try:
+    import vim
+    import sys
+except:
+    vim.command('let l:ret = 2')
+
+EEOOFF
+
+    if l:ret != 0
+        return l:ret
+    endif
+
+    python << EEOOFF
+
+try:
+    sys.path.insert(0, vim.eval('a:editorconfig_core_py_dir'))
+
+    from editorconfig.handler import EditorConfigHandler
+    import editorconfig.exceptions as editorconfig_except
+
+except:
+    vim.command('let l:ret = 3')
+
+del sys.path[0] 
+
+ec_data = {}  # used in order to keep clean Python namespace
+
+EEOOFF
+
+    if l:ret != 0
+        return l:ret
+    endif
+
+    return 0
+endfunction
+
+" Do some initalization for the case that the user has specified core mode {{{1
+if !empty(s:editorconfig_core_mode)
+ 
+    if s:editorconfig_core_mode == 'external_command'
+        if s:InitializeExternalCommand()
+            echo 'EditorConfig: Failed to initialize external_command mode'
+            finish
+        endif
+    else
+        let s:editorconfig_core_py_dir = s:FindPythonFiles()
+
+        if empty(s:editorconfig_core_py_dir)
+            echo 'EditorConfig: '.
+                        \ 'EditorConfig Python Core files could not be found.'
+            finish
+        endif
+
+        if s:editorconfig_core_mode == 'python_builtin' &&
+                    \ s:InitializePythonBuiltin(s:editorconfig_core_py_dir)
+            echo 'EditorConfig: Failed to initialize vim built-in python.'
+            finish
+        elseif s:editorconfig_core_mode == 'python_external' &&
+                    \ s:InitializePythonExternal()
+            echo 'EditorConfig: Failed to find external Python interpreter.'
+            finish
+        endif
+    endif
+endif
+
+" Determine the editorconfig_core_mode we should use {{{1
+while 1
+    " If user has specified a mode, just break
+    if exists('s:editorconfig_core_mode') && !empty(s:editorconfig_core_mode)
+        break
+    endif
+
+    " Find Python core files. If not found, we try external_command mode
+    let s:editorconfig_core_py_dir = s:FindPythonFiles()
+    if empty(s:editorconfig_core_py_dir) " python files are not found
+        if !s:InitializeExternalCommand()
+            let s:editorconfig_core_mode = 'external_command'
+        endif
+        break
+    endif
+
+    " Builtin python mode first
+    if !s:InitializePythonBuiltin(s:editorconfig_core_py_dir)
+        let s:editorconfig_core_mode = 'python_builtin'
+        break
+    endif
+
+    " Then external_command mode
+    if !s:InitializeExternalCommand()
+        let s:editorconfig_core_mode = 'external_command'
+        break
+    endif
+
+    " Finally external python mode
+    if !s:InitializePythonExternal()
+        let s:editorconfig_core_mode = 'python_external'
+        break
+    endif
+
+    break
+endwhile
+
+" No EditorConfig Core is available
+if empty(s:editorconfig_core_mode)
+    echo "EditorConfig: ".
+                \ "No EditorConfig Core is available. The plugin won't work."
+    finish
+endif
+
+function! s:UseConfigFiles()
+    if s:editorconfig_core_mode == 'external_command'
+        call s:UseConfigFiles_ExternalCommand()
+    elseif s:editorconfig_core_mode == 'python_builtin'
+        call s:UseConfigFiles_Python_Builtin()
+    elseif s:editorconfig_core_mode == 'python_external'
+        call s:UseConfigFiles_Python_External()
+    else
+        echohl Error |
+                    \ echo "Unknown EditorConfig Core: " .
+                    \ s:editorconfig_core_mode |
+                    \ echohl None
+    endif
+endfunction
+
+" command, autoload {{{1
+command! EditorConfigReload call s:UseConfigFiles() " Reload EditorConfig files
+augroup editorconfig
+autocmd! editorconfig
+autocmd editorconfig BufNewFile,BufReadPost * call s:UseConfigFiles()
+autocmd editorconfig BufNewFile,BufRead .editorconfig set filetype=dosini
+
+" UseConfigFiles function for different mode {{{1
+function! s:UseConfigFiles_Python_Builtin() " {{{2
+" Use built-in python to run the python EditorConfig core
+
+    let l:config = {}
+    let l:ret = 0
+
+    python << EEOOFF
+
+ec_data['filename'] = vim.eval("expand('%:p')")
+ec_data['conf_file'] = ".editorconfig"
+ec_data['handler'] = EditorConfigHandler(
+        ec_data['filename'],
+        ec_data['conf_file'])
+
+try:
+    ec_data['options'] = ec_data['handler'].get_configurations()
+except editorconfig_except.EditorConfigError as e:
+    if int(vim.eval('g:EditorConfig_verbose')) != 0:
+        print >> sys.stderr, str(e)
+    vim.command('let l:ret = 1')
+
+EEOOFF
+    if l:ret != 0
+        return l:ret
+    endif
+
+    python << EEOOFF
+for key, value in ec_data['options'].items():
+    vim.command('let l:config[' + repr(key) + '] = ' + repr(value))
+
+EEOOFF
+
+    call s:ApplyConfig(l:config)
+
+    return 0
+endfunction
+
+function! s:UseConfigFiles_Python_External() " {{{2
+" Use external python interp to run the python EditorConfig Core
+
+    let l:cmd = s:editorconfig_python_interp . ' ' .
+                \ s:editorconfig_core_py_dir . '/main.py'
+
+    call s:SpawnExternalParser(l:cmd)
+
+    return 0
+endfunction
+
+function! s:UseConfigFiles_ExternalCommand() " {{{2
+" Use external EditorConfig core (The C core, or editorconfig.py)
+    call s:SpawnExternalParser(s:EditorConfig_exec_path)
+endfunction
+
+function! s:SpawnExternalParser(cmd) " {{{2
+" Spawn external EditorConfig. Used by s:UseConfigFiles_Python_External() and
+" s:UseConfigFiles_ExternalCommand()
+
+    let l:cmd = a:cmd
 
     " if editorconfig is present, we use this as our parser
     if !empty(l:cmd)
@@ -121,8 +449,9 @@ function! s:UseConfigFiles()
     endif
 endfunction
 
+function! s:ApplyConfig(config) " {{{1
 " Set the indentation style according to the config values
-function! s:ApplyConfig(config)
+
     if has_key(a:config, "indent_style")
         if a:config["indent_style"] == "tab"
             setl noexpandtab
@@ -162,6 +491,9 @@ function! s:ApplyConfig(config)
     endif
 endfunction
 
+" }}}
+
 let &cpo = s:saved_cpo
 unlet! s:saved_cpo
 
+" vim: fdm=marker fdc=3
