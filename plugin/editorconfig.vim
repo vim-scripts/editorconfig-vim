@@ -116,7 +116,7 @@ function! s:FindPythonFiles() " {{{1
     let l:python_core_files_dir = substitute(
                 \ fnamemodify(l:python_core_files_dir, ':p'), '/$', '', '')
 
-    set noshellslash
+    let &shellslash = l:old_shellslash
 
     return l:python_core_files_dir
 endfunction
@@ -385,7 +385,8 @@ EEOOFF
 
     python << EEOOFF
 for key, value in ec_data['options'].items():
-    vim.command('let l:config[' + repr(key) + '] = ' + repr(value))
+    vim.command("let l:config['" + key.replace("'", "''") + "'] = " +
+        "'" + value.replace("'", "''") + "'")
 
 EEOOFF
 
@@ -425,14 +426,25 @@ function! s:SpawnExternalParser(cmd) " {{{2
     if !empty(l:cmd)
         let l:config = {}
 
+        " In Windows, 'shellslash' also changes the behavior of 'shellescape'.
+        " It makes 'shellescape' behave like in UNIX environment. So ':setl
+        " noshellslash' before evaluating 'shellescape' and restore the
+        " settings afterwards.
+        let l:old_shellslash = &l:shellslash
+        setlocal noshellslash
         let l:cmd = l:cmd . ' ' . shellescape(expand('%:p'))
+        let &l:shellslash = l:old_shellslash
         let l:parsing_result = split(system(l:cmd), '\n')
 
         " if editorconfig core's exit code is not zero, give out an error
         " message
         if v:shell_error != 0
             echohl ErrorMsg
-            echo 'Failed to execute "' . l:cmd . '"'
+            echo 'Failed to execute "' . l:cmd . '". Exit code: ' .
+                        \ v:shell_error
+            echo ''
+            echo 'Message:'
+            echo l:parsing_result
             echohl None
             return
         endif
@@ -489,7 +501,7 @@ function! s:ApplyConfig(config) " {{{1
 
     endif
 
-    if has_key(a:config, "end_of_line")
+    if has_key(a:config, "end_of_line") && &l:modifiable
         if a:config["end_of_line"] == "lf"
             setl fileformat=unix
         elseif a:config["end_of_line"] == "crlf"
@@ -499,7 +511,7 @@ function! s:ApplyConfig(config) " {{{1
         endif
     endif
 
-    if has_key(a:config, "charset")
+    if has_key(a:config, "charset") && &l:modifiable
         if a:config["charset"] == "utf-8"
             setl fileencoding=utf-8
             setl nobomb
@@ -518,20 +530,6 @@ function! s:ApplyConfig(config) " {{{1
         endif
     endif
 
-    if has_key(a:config, "insert_final_newline")
-        augroup editorconfig_insert_final_newline
-        autocmd! editorconfig_insert_final_newline
-        if a:config["insert_final_newline"] == "false"
-            setl noeol
-            autocmd editorconfig_insert_final_newline BufWritePre <buffer> call s:TempSetBinary()
-            autocmd editorconfig_insert_final_newline BufWritePost <buffer> call s:TempUnsetBinary()
-        else
-            setl eol
-        endif
-
-        augroup END " editorconfig_insert_final_newline group
-    endif
-
     if has_key(a:config, "trim_trailing_whitespace")
         augroup editorconfig_trim_trailing_whitespace
         autocmd! editorconfig_trim_trailing_whitespace
@@ -542,51 +540,20 @@ function! s:ApplyConfig(config) " {{{1
         augroup END " editorconfig_trim_trailing_whitespace group
     endif
 
-    call editorconfig#ApplyHooks(a:config)
-endfunction
+    if has_key(a:config, 'max_line_length')
+        let l:max_line_length = str2nr(a:config['max_line_length'])
 
-function! s:TempSetBinary()
-" If file is not binary then set it to binary before save
-    let s:old_binary = &l:binary
-    if ! &l:binary
-        let s:saved_view = winsaveview()
+        if l:max_line_length > 0
+            let &l:textwidth = l:max_line_length
 
-        " Prepend BOM character to first line if applicable
-        if &bomb
-            if &l:fileencoding == "utf-8"
-                let s:bomb_chars = "\ufeff"
-            elseif &l:fileencoding == "utf-16be"
-                let s:bomb_chars = "\ufeff"
-            elseif &l:fileencoding == "utf-16le"
-                let s:bomb_chars = "\ufefe"
+            " highlight the column
+            if exists('+colorcolumn')
+                let &l:colorcolumn = l:max_line_length
             endif
-        else
-            let s:bomb_chars = ""
-        endif
-        exec ("1s/^/" . s:bomb_chars)
-
-        setl binary
-        setl noeol
-        if (&l:fileformat == "dos" || &l:fileformat == "mac") && line('$') > 1
-            undojoin | exec "silent 1,$-1normal! A\<C-V>\<C-M>"
-        endif
-        if &l:fileformat == "mac"
-            undojoin | %join!
         endif
     endif
-endfunction
 
-function! s:TempUnsetBinary()
-    if ! s:old_binary
-        if &l:fileformat == "dos" && line('$') > 1
-            undojoin | silent 1,$-1s/\r$//e
-        elseif &l:fileformat == "mac"
-            undojoin | silent %s/\r/\r/ge
-        endif
-        undojoin | exec ("1s/^" . s:bomb_chars . "//")
-        setlocal nobinary
-        call winrestview(s:saved_view)
-    endif
+    call editorconfig#ApplyHooks(a:config)
 endfunction
 
 " }}}
