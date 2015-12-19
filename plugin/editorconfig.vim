@@ -1,4 +1,4 @@
-" Copyright (c) 2011-2012 EditorConfig Team
+" Copyright (c) 2011-2015 EditorConfig Team
 " All rights reserved.
 "
 " Redistribution and use in source and binary forms, with or without
@@ -49,11 +49,24 @@ if !exists('g:EditorConfig_verbose')
     let g:EditorConfig_verbose = 0
 endif
 
+if !exists('g:EditorConfig_preserve_formatoptions')
+    let g:EditorConfig_preserve_formatoptions = 0
+endif
+
+if !exists('g:EditorConfig_max_line_indicator')
+    let g:EditorConfig_max_line_indicator = 'line'
+endif
+
+if !exists('g:EditorConfig_exclude_patterns')
+    let g:EditorConfig_exclude_patterns = []
+endif
+
 if exists('g:EditorConfig_core_mode') && !empty(g:EditorConfig_core_mode)
     let s:editorconfig_core_mode = g:EditorConfig_core_mode
 else
     let s:editorconfig_core_mode = ''
 endif
+
 
 function! s:FindPythonInterp() " {{{1
 " Find python interp. If found, return python command; if not found, return ''
@@ -104,17 +117,18 @@ function! s:FindPythonFiles() " {{{1
     let l:old_shellslash = &shellslash
     set shellslash
 
-    let l:python_core_files_dir = substitute(
+    let l:python_core_files_dir = fnamemodify(
                 \ findfile(g:EditorConfig_python_files_dir . '/main.py',
-                \ ','.&runtimepath), '/main.py$', '', '')
+                \ ','.&runtimepath), ':p:h')
 
     if empty(l:python_core_files_dir)
-        return ''
-    endif
+        let l:python_core_files_dir = ''
+    else
 
     " expand python core file path to full path, and remove the appending '/'
     let l:python_core_files_dir = substitute(
                 \ fnamemodify(l:python_core_files_dir, ':p'), '/$', '', '')
+    endif
 
     let &shellslash = l:old_shellslash
 
@@ -162,6 +176,10 @@ function! s:InitializeExternalCommand() " {{{2
                     \ 'D:\Program Files\editorconfig\bin\editorconfig',
                     \ 'E:\Program Files\editorconfig\bin\editorconfig',
                     \ 'F:\Program Files\editorconfig\bin\editorconfig',
+                    \ 'C:\Program Files (x86)\editorconfig\bin\editorconfig',
+                    \ 'D:\Program Files (x86)\editorconfig\bin\editorconfig',
+                    \ 'E:\Program Files (x86)\editorconfig\bin\editorconfig',
+                    \ 'F:\Program Files (x86)\editorconfig\bin\editorconfig',
                     \ 'editorconfig.py']
     endif
 
@@ -331,6 +349,19 @@ if empty(s:editorconfig_core_mode)
 endif
 
 function! s:UseConfigFiles()
+
+    " ignore buffers without a name
+    if empty(expand('%:p'))
+        return
+    endif
+
+    " Ignore specific patterns
+    for pattern in g:EditorConfig_exclude_patterns
+        if expand('%:p') =~ pattern
+            return
+        endif
+    endfor
+
     if s:editorconfig_core_mode == 'external_command'
         call s:UseConfigFiles_ExternalCommand()
     elseif s:editorconfig_core_mode == 'python_builtin'
@@ -348,10 +379,9 @@ endfunction
 " command, autoload {{{1
 command! EditorConfigReload call s:UseConfigFiles() " Reload EditorConfig files
 augroup editorconfig
-autocmd! editorconfig
-autocmd editorconfig BufNewFile,BufReadPost * call s:UseConfigFiles()
-autocmd editorconfig BufNewFile,BufRead .editorconfig set filetype=dosini
-
+    autocmd!
+    autocmd BufNewFile,BufReadPost,BufFilePost * call s:UseConfigFiles()
+    autocmd BufNewFile,BufRead .editorconfig set filetype=dosini
 augroup END
 
 " UseConfigFiles function for different mode {{{1
@@ -373,7 +403,7 @@ ec_data['conf_file'] = ".editorconfig"
 
 try:
     ec_data['options'] = editorconfig.get_properties(ec_data['filename'])
-except editorconfig_except.EditorConfigError, e:
+except editorconfig_except.EditorConfigError as e:
     if int(vim.eval('g:EditorConfig_verbose')) != 0:
         print >> sys.stderr, str(e)
     vim.command('let l:ret = 1')
@@ -429,11 +459,19 @@ function! s:SpawnExternalParser(cmd) " {{{2
         " In Windows, 'shellslash' also changes the behavior of 'shellescape'.
         " It makes 'shellescape' behave like in UNIX environment. So ':setl
         " noshellslash' before evaluating 'shellescape' and restore the
-        " settings afterwards.
-        let l:old_shellslash = &l:shellslash
-        setlocal noshellslash
+        " settings afterwards when 'shell' does not contain 'sh' somewhere.
+        if has('win32') && empty(matchstr(&shell, 'sh'))
+            let l:old_shellslash = &l:shellslash
+            setlocal noshellslash
+        endif
+
         let l:cmd = l:cmd . ' ' . shellescape(expand('%:p'))
-        let &l:shellslash = l:old_shellslash
+
+        " restore 'shellslash'
+        if exists('l:old_shellslash')
+            let &l:shellslash = l:old_shellslash
+        endif
+
         let l:parsing_result = split(system(l:cmd), '\n')
 
         " if editorconfig core's exit code is not zero, give out an error
@@ -471,6 +509,11 @@ function! s:SpawnExternalParser(cmd) " {{{2
 endfunction
 
 function! s:ApplyConfig(config) " {{{1
+    " Only process normal buffers (do not treat help files as '.txt' files)
+    if !empty(&buftype)
+        return
+    endif
+
 " Set the indentation style according to the config values
 
     if has_key(a:config, "indent_style")
@@ -530,25 +573,46 @@ function! s:ApplyConfig(config) " {{{1
         endif
     endif
 
-    if has_key(a:config, "trim_trailing_whitespace")
-        augroup editorconfig_trim_trailing_whitespace
-        autocmd! editorconfig_trim_trailing_whitespace
-        if a:config["trim_trailing_whitespace"] == "true"
-            autocmd editorconfig_trim_trailing_whitespace BufWritePre <buffer> :%s/\s\+$//e
+    augroup editorconfig_trim_trailing_whitespace
+        autocmd! BufWritePre <buffer>
+        if get(a:config, 'trim_trailing_whitespace', 'false') ==# 'true'
+            autocmd BufWritePre <buffer> call s:TrimTrailingWhitespace()
         endif
+    augroup END
 
-        augroup END " editorconfig_trim_trailing_whitespace group
+    if has_key(a:config, "insert_final_newline")
+        if exists('+fixendofline')
+            if a:config["insert_final_newline"] == "false"
+                setl nofixendofline
+            else
+                setl fixendofline
+            endif
+        elseif  exists(':SetNoEOL') == 2
+            if a:config["insert_final_newline"] == "false"
+                silent! SetNoEOL    " Use the PreserveNoEOL plugin to accomplish it
+            endif
+        endif
     endif
 
+    " highlight the columns following max_line_length
     if has_key(a:config, 'max_line_length')
         let l:max_line_length = str2nr(a:config['max_line_length'])
 
-        if l:max_line_length > 0
+        if l:max_line_length >= 0
             let &l:textwidth = l:max_line_length
+            if g:EditorConfig_preserve_formatoptions == 0
+                setlocal formatoptions+=tc
+            endif
+        endif
 
-            " highlight the column
-            if exists('+colorcolumn')
-                let &l:colorcolumn = l:max_line_length
+        if exists('+colorcolumn')
+            if l:max_line_length > 0
+                if g:EditorConfig_max_line_indicator == 'line'
+                    let &l:colorcolumn = l:max_line_length + 1
+                elseif g:EditorConfig_max_line_indicator == 'fill'
+                    let &l:colorcolumn = join(
+                                \ range(l:max_line_length+1,&l:columns),',')
+                endif
             endif
         endif
     endif
@@ -557,6 +621,16 @@ function! s:ApplyConfig(config) " {{{1
 endfunction
 
 " }}}
+
+function! s:TrimTrailingWhitespace() " {{{{
+    " don't lose user position when trimming trailing whitespace
+    let s:view = winsaveview()
+    try
+        %s/\s\+$//e
+    finally
+        call winrestview(s:view)
+    endtry
+endfunction " }}}
 
 let &cpo = s:saved_cpo
 unlet! s:saved_cpo
